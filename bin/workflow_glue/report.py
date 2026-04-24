@@ -204,7 +204,12 @@ values across plots.***
     # canned VCF stats report component
     if not args.hide_variants:
         section = report_doc.add_section()
-        bcfstats.full_report(args.bcftools_stats, report=section)
+        try:
+            bcfstats.full_report(args.bcftools_stats, report=section)
+        except (IndexError, KeyError, Exception) as e:
+            section.markdown(
+                f"*Variant summary unavailable: {e}*")
+            logger.warning(f"bcfstats report skipped: {e}")
 
     # NextClade analysis
     if args.nextclade is not None:
