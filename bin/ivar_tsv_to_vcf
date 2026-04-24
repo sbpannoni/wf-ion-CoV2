@@ -1,0 +1,11 @@
+#!/usr/bin/env python3
+"""Wrapper: delegates to workflow_glue/ivar_tsv_to_vcf.py."""
+import os
+import sys
+
+# bin/ is in PATH; the module lives one level up from this script's real location
+script_dir = os.path.dirname(os.path.realpath(__file__))
+sys.path.insert(0, os.path.join(script_dir, "workflow_glue"))
+
+from ivar_tsv_to_vcf import main  # noqa: E402
+main()

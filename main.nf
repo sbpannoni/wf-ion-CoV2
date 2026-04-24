@@ -5,7 +5,7 @@ import java.text.SimpleDateFormat
 
 nextflow.enable.dsl = 2
 
-include { fastq_ingress } from './lib/ingress'
+include { xam_ingress } from './lib/ingress'
 
 process checkSampleSheet {
     label "artic"
@@ -20,17 +20,17 @@ process checkSampleSheet {
 }
 
 
-process runArtic {
-    label "artic"
+process runIonAmpliseq {
+    label "ion_ampliseq"
     cpus params.artic_threads
     input:
-        tuple val(meta), path(fastq_file), path(fastq_stats)
+        tuple val(meta), path(bam_file), path(bam_index)
         path scheme_dir
     output:
-        path "${meta.alias}.consensus.fasta", emit: consensus
-        path "${meta.alias}.depth.txt", emit: depth_stats
-        path "${meta.alias}.pass.named.stats", emit: vcf_stats
-        path "${meta.alias}.artic.log.txt", emit: artic_log
+        path "${meta.alias}.consensus.fasta",          emit: consensus
+        path "${meta.alias}.depth.txt",                emit: depth_stats
+        path "${meta.alias}.ivar_variants.tsv",        emit: vcf_stats
+        path "${meta.alias}.ion.log.txt",              emit: artic_log
         tuple(
             val(meta.alias),
             path("${meta.alias}.pass.named.vcf.gz"),
@@ -52,23 +52,20 @@ process runArtic {
             path("${meta.alias}.trimmed.rg.sorted.bam.bai"),
             emit: trimmed_bam)
     script:
-    // we use `params.override_basecaller_cfg` if present; otherwise use
-    // `meta.basecall_models[0]` (there should only be one value in the list because
-    // we're running ingress with `allow_multiple_basecall_models: false`; note that
-    // `[0]` on an empty list returns `null`)
-    String basecall_model = params.override_basecaller_cfg ?: meta.basecall_models[0]
-    if (!basecall_model) {
-        error "Found no basecall model information in the input data for " + \
-            "sample '$meta.alias'. Please provide it with the " + \
-            "`--override_basecaller_cfg` parameter."
-    }
     """
-    run_artic.sh \
-        ${meta.alias} ${fastq_file} ${params._min_len} ${params._max_len} \
-        ${basecall_model}:consensus ${params._scheme_name} ${scheme_dir} \
-        ${params._scheme_version} ${task.cpus} ${params._max_softclip_length} ${params.normalise} \
-        > ${meta.alias}.artic.log.txt 2>&1
-    bcftools stats ${meta.alias}.pass.named.vcf.gz > ${meta.alias}.pass.named.stats
+    run_ion_ampliseq.sh \
+        ${meta.alias} ${bam_file} ${params._scheme_name} ${scheme_dir} \
+        ${task.cpus} ${params.ivar_min_trim_len} ${params.ivar_min_qual} \
+        ${params.ivar_min_freq} ${params.ivar_min_depth} ${params.ivar_consensus_freq} \
+        > ${meta.alias}.ion.log.txt 2>&1
+    ivar_tsv_to_vcf \
+        -t ${meta.alias}.ivar_variants.tsv \
+        -r ${scheme_dir}/${params._scheme_name}.reference.fasta \
+        -s ${meta.alias} \
+        -o ${meta.alias}.pass.named.vcf.gz
+    cp ${meta.alias}.pass.named.vcf.gz ${meta.alias}.merged.gvcf.named.vcf.gz
+    cp ${meta.alias}.pass.named.vcf.gz.tbi ${meta.alias}.merged.gvcf.named.vcf.gz.tbi
+    bcftools stats ${meta.alias}.pass.named.vcf.gz > ${meta.alias}.ivar_variants.stats
     """
 }
 
@@ -128,17 +125,16 @@ process combineGenotypeSummaries {
 
 
 process getVersions {
-    label "artic"
+    label "ion_ampliseq"
     cpus 1
     output:
         path "versions.txt"
     script:
     """
-    medaka --version | sed 's/ /,/' >> versions.txt
+    ivar version 2>&1 | head -n 1 | sed 's/iVar version /ivar,/' >> versions.txt
     minimap2 --version | sed 's/^/minimap2,/' >> versions.txt
     bcftools --version | head -n 1 | sed 's/ /,/' >> versions.txt
     samtools --version | head -n 1 | sed 's/ /,/' >> versions.txt
-    artic --version | sed 's/ /,/' >> versions.txt
     """
 }
 
@@ -162,7 +158,6 @@ process report {
     cpus 1
     input:
         path "depth_stats/*"
-        path "per_read_stats/?.gz"
         path "nextclade.json"
         path nextclade_errors
         path "pangolin.csv"
@@ -197,11 +192,8 @@ process report {
         --nextclade_errors $nextclade_errors \
         --revision $workflow.revision \
         --commit $workflow.commitId \
-        --min_len $params._min_len \
-        --max_len $params._max_len \
         --report_depth $params.report_depth \
         --depths depth_stats/* \
-        --fastcat_stats per_read_stats/* \
         --bcftools_stats vcf_stats/* $genotype \
         --versions versions \
         --params params.json \
@@ -391,17 +383,19 @@ workflow pipeline {
                 workflow_params)
             results = html_doc[0].concat(html_doc[1])
         } else {
-            // remove samples that only appeared in the sample sheet but didn't have any
-            // reads
+            // xam_ingress may emit [meta, bam, bai] or [meta, bam, bai, bamstats_dir]
+            // normalise to 3-tuple and filter samples with no mapped reads
             samples = samples
-            | map { meta, reads, stats ->
-                if (meta.n_seqs == 0 || !meta.n_seqs) {
+            | map { tuple ->
+                def (meta, bam, bai) = tuple
+                def n = meta.n_primary ?: meta.n_seqs ?: 0
+                if (n == 0) {
                     log.warn "No input data found for sample '$meta.alias'; skipping..."
                 } else {
-                    [meta, reads, stats]
+                    [meta, bam, bai]
                 }
             }
-            artic = runArtic(samples, scheme_dir)
+            artic = runIonAmpliseq(samples, scheme_dir)
             all_depth = combineDepth(artic.depth_stats.collect())
             // collate consensus and variants
             all_consensus = allConsensus(artic.consensus.collect())
@@ -426,7 +420,6 @@ workflow pipeline {
             // report
             html_doc = report(
                 artic.depth_stats.collect(),
-                samples.map { it[2].resolve("per-read-stats.tsv.gz") }.toList(),
                 clades[0].collect(),
                 clades[1].collect(),
                 pangolin.out.report.collect(),
@@ -514,35 +507,12 @@ workflow {
           exit 1
       }
 
-      if (!params.min_len) {
-          params.remove('min_len')
-          if (params.scheme_version.startsWith("Midnight") || params.scheme_version == 'NEB-VarSkip/v1a-long') {
-              params._min_len = 150
-          } else {
-              params._min_len = 400
-          }
-      } else {
-          params._min_len = params.min_len
-          params.remove('min_len')
-      }
-      if (!params.max_len) {
-          params.remove('max_len')
-          if (params.scheme_version.startsWith("Midnight")) {
-              params._max_len = 1200
-          } else if (params.scheme_version == 'NEB-VarSkip/v1a-long') {
-              params._max_len = 1800
-          } else {
-              params._max_len = 700
-          }
-      } else {
-          params._max_len = params.max_len
-          params.remove('max_len')
-      }
-    
-      
       scheme_dir_name = "primer_schemes"
-      schemes = """./data/${scheme_dir_name}/${params.scheme_name}"""
-      scheme_dir = file(projectDir.resolve(schemes), type:'file', checkIfExists:true)
+      // scheme_dir points to the version-specific directory so run_ion_ampliseq.sh
+      // can access BED and reference directly as ${scheme_dir}/${scheme_name}.*
+      scheme_dir = file(
+          projectDir.resolve("./data/${scheme_dir_name}/${params.scheme_name}/${params.scheme_version}"),
+          type:'file', checkIfExists:true)
 
       primers_path = """./data/${scheme_dir_name}/${params.scheme_name}/${params.scheme_version}/${params.scheme_name}.scheme.bed"""
       primers = file(projectDir.resolve(primers_path), type:'file', checkIfExists:true)
@@ -560,31 +530,10 @@ workflow {
       primers = file("""${params.custom_scheme}/${params.scheme_name}.scheme.bed""", type:'file', checkIfExists:true)
       reference = file("""${params.custom_scheme}/${params.scheme_name}.reference.fasta""", type:'file', checkIfExists:true)
 
-      // check to make sure min and max length have been set
-      if (!params.max_len || !params.min_len) {
-          log.info """${c_purple}EXITING: --min_len and --max_len parameters must be specified when using custom schemes.${c_reset}"""
-          exit 1
-      }
-
-      params._max_len = params.max_len
-      params.remove('max_len')
-
-      params._min_len = params.min_len
-      params.remove('min_len')
-
       params._scheme_version = 'None'
       params._scheme_name = params.scheme_name
 
       scheme_dir =  params.custom_scheme
-    }
-
-    if (!params.max_softclip_length) {
-        params.remove('max_softclip_length')
-        params._max_softclip_length = 0
-    }
-    else{
-        params._max_softclip_length = params.max_softclip_length
-        params.remove('max_softclip_length')
     }
 
     // Pangolin options
@@ -624,15 +573,12 @@ workflow {
         ref_variants = Channel.fromPath("$projectDir/data/OPTIONAL_FILE")
     }
 
-    // check fastq dataset and run workflow
-    samples = fastq_ingress([
-        "input":params.fastq,
-        "sample":params.sample,
-        "sample_sheet":params.sample_sheet,
-        "stats": true,
-        "per_read_stats": true,
-        "analyse_unclassified":params.analyse_unclassified,
-        "allow_multiple_basecall_models":false,
+    // ingest Ion Torrent BAM files
+    samples = xam_ingress([
+        "input": params.bam,
+        "sample": params.sample,
+        "sample_sheet": params.sample_sheet,
+        "analyse_unclassified": params.analyse_unclassified,
     ])
 
     results = pipeline(samples, scheme_dir, params._scheme_name, params._scheme_version, reference,

@@ -6,7 +6,6 @@ import json
 from aplanat import bars, lines, report
 from aplanat.components import bcfstats, nextclade
 from aplanat.components import simple as scomponents
-from aplanat.components.fastcat import read_length_plot, read_quality_plot
 from aplanat.util import Colors
 from bokeh.layouts import gridplot, layout
 from bokeh.models import Panel, Range1d, Tabs
@@ -28,7 +27,7 @@ def read_files(summaries, **kwargs):
     return pd.concat(dfs)
 
 
-def output_json(df, consensus_fasta, readcounts):
+def output_json(df, consensus_fasta):
     """Read depth stats df and create JSON output."""
     grouped_by_sample = df.groupby('sample_name')
     all_json = {}
@@ -60,7 +59,6 @@ def output_json(df, consensus_fasta, readcounts):
                 'chromosome': entry.comment,
                 'seqlen': len(entry.sequence),
                 'ncount': (entry.sequence).count('N'),
-                'readcount': readcounts[entry.name],
                 'coverage': all_json[entry.name]
             })
     return final_json
@@ -71,7 +69,7 @@ def main(args):
     logger = get_named_logger("report")
 
     report_doc = report.WFReport(
-        "SARS-CoV-2 ARTIC Sequencing report", "wf-artic",
+        "SARS-CoV-2 Ion Torrent Ampliseq Sequencing Report", "wf-ion-CoV2",
         revision=args.revision, commit=args.commit)
 
     # Get samples and types into something we can use
@@ -81,82 +79,12 @@ def main(args):
 
     section = report_doc.add_section()
     section.markdown('''
-    N.B. The versions of pangolin and nextclade are indicated in the footer of
-     this report. Because of the fast moving nature of the pandemic these
-     versions may not be the most recent, but we check daily for new versions.
-     More details are provided
-     [here](https://labs.epi2me.io/sarscov2-midnight-analysis).
-    ''')
+### Ion Torrent Ampliseq Analysis Status
 
-    section = report_doc.add_section()
-    section.markdown('''
-### Read Quality control
-
-This section displays basic QC metrics indicating read data quality.
+The panel below lists samples which failed to produce results. Samples not
+listed here were analysed successfully, but may still contain inconclusive or
+invalid results. See the following sections for further information.
 ''')
-    # read length summary
-    tabs = {}
-    sample_readcounts = {}
-    sample_goodreadcounts = {}
-    for summary_fn in args.fastcat_stats:
-        df_sample = pd.read_csv(summary_fn, sep="\t")
-        sample_id = df_sample['sample_name'].iloc[0]
-        rlp = read_length_plot(
-            df_sample,
-            min_len=args.min_len,
-            max_len=args.max_len,
-            xlim=(0, 2000),
-        )
-        rqp = read_quality_plot(df_sample)
-        grid = gridplot(
-            [rlp, rqp], ncols=2, sizing_mode="stretch_width")
-        tabs[sample_id] = Panel(child=grid, title=sample_id)
-        # count total reads for output_json
-        sample_readcounts[sample_id] = df_sample.shape[0]
-        # count "good reads" for additional bar plot
-        good_reads = df_sample.loc[
-            (df_sample['read_length'] > args.min_len)
-            & (df_sample['read_length'] < args.max_len)
-        ]
-        sample_goodreadcounts[sample_id] = good_reads.shape[0]
-
-    barcode_keys = sorted(sample_goodreadcounts)
-
-    # barcode count plot
-    bc_counts = bars.simple_bar(
-        barcode_keys,
-        [sample_goodreadcounts.get(x) for x in barcode_keys],
-        colors=[Colors.cerulean]*len(sample_goodreadcounts),
-        title=(
-            'Number of reads per barcode '
-            '(filtered by {} < length < {})'.format(
-                args.min_len, args.max_len)),
-        plot_width=None
-    )
-    bc_counts.xaxis.major_label_orientation = 3.14/2
-
-    section = report_doc.add_section()
-    section.markdown("""
-    ### Sequence summaries""")
-    section.plot(
-        layout(
-            [
-                Tabs(tabs=[tabs.get(x) for x in barcode_keys]),
-                [bc_counts],
-            ],
-            sizing_mode="stretch_width"
-        )
-    )
-
-    section = report_doc.add_section()
-    section.markdown("""
-### Artic Analysis status
-
-The panel below lists samples which failed to produce
-results from the primary ARTIC analysis. Samples not listed here were analysed
-successfully, but may still contain inconclusive or invalid results. See the
-following sections for further indications of failed or inconclusive results.
-""")
     status = pd.read_csv(args.status, sep='\t')
     failed = status.loc[status['pass'] == 0]
     if len(failed) == 0:
@@ -182,20 +110,18 @@ following sections for further indications of failed or inconclusive results.
         section.markdown('''
 ### Genome coverage
 
-Plots below indicate depth of coverage from data used
-within the Artic analysis coloured by amplicon pool.  Variant filtering during
-the ARTIC analysis mandates a minimum coverage of at least {}X at
-variant/genotyping loci for a call to be made.
+Plots below indicate depth of coverage coloured by Ampliseq primer pool.
+iVar variant calling requires a minimum depth of at least {}X; positions
+below this threshold are masked as N in the consensus.
 
-***NB: To better display all possible data, the depth axes of the plots below
-are not tied between plots for different samples. Care should be taken in
-comparing depth across samples.***
-'''.format(args.min_cover))
+***NB: Depth axes are not tied between samples — do not compare absolute
+values across plots.***
+'''.format(args.report_depth))
 
         # depth summary by amplicon pool
         df = read_files(
             args.depths, sep="\t", converters={'sample_name': str})
-        epi2me_json = output_json(df, args.consensus_fasta, sample_readcounts)
+        epi2me_json = output_json(df, args.consensus_fasta)
         json_object = json.dumps(epi2me_json, indent=4, separators=(',', ':'))
         json_file = open("artic.json", "a")
         json_file.write(json_object)
@@ -318,9 +244,9 @@ The table below reports the lineage of each sample as calculated by
 The table below lists whether candidate variants were determined to exist
 within each sample.
 
-The ARTIC workflow pre-filters (removes) candidate variants according to the
-criteria `variant_score < 20` and `coverage < 20`. The table draws attention to
-reference calls of low coverage (<20 reads) which may therefore be inaccurate.
+Variants are pre-filtered by iVar using minimum quality (default 20) and
+minimum allele frequency (default 0.25). Positions with coverage below the
+minimum depth threshold are reported as `n/a`.
 ''')
         df = read_files(args.genotypes, sep=',')
         df = df[[
@@ -357,9 +283,6 @@ def argparser():
         "--depths", nargs='+', required=True,
         help="Depth summary files")
     parser.add_argument(
-        "--fastcat_stats", nargs='+', required=True,
-        help="fastcat summary file")
-    parser.add_argument(
         "--nextclade",
         help="nextclade json output file")
     parser.add_argument(
@@ -371,15 +294,6 @@ def argparser():
     parser.add_argument(
         "--genotypes", nargs='+', required=False,
         help="Genotyping summary files")
-    parser.add_argument(
-        "--min_cover", default=20, type=int,
-        help="Minimum locus coverage for variant call.")
-    parser.add_argument(
-        "--min_len", default=300, type=int,
-        help="Minimum read length")
-    parser.add_argument(
-        "--max_len", default=700, type=int,
-        help="Maximum read length")
     parser.add_argument(
         "--report_depth", default=100, type=int,
         help=(
