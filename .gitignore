@@ -6,3 +6,4 @@ template-workflow
 *.pyc
 *.pyo
 .DS_store
+work/
