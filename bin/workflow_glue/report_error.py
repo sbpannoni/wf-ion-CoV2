@@ -12,7 +12,7 @@ def main(args):
     logger = get_named_logger("report-error")
 
     report_doc = report.WFReport(
-        "SARS-CoV-2 ARTIC Sequencing report", "wf-artic",
+        "SARS-CoV-2 Ion Torrent Ampliseq Sequencing Report", "wf-ion-covid",
         revision=args.revision, commit=args.commit)
     section = report_doc.add_section()
     # error message

@@ -169,11 +169,11 @@ process report {
         path "consensus_fasta"
         val metadata
     output:
-        path "wf-artic-report.html"
+        path "wf-ion-covid-report.html"
         path "*.json"
     script:
     // when genotype_variants is false the channel contains a mock file
-    def report_name = "wf-artic-report.html"
+    def report_name = "wf-ion-covid-report.html"
     def genotype = params.genotype_variants ? "--genotypes genotypes/*" : ""
     def nextclade = params.report_clade as Boolean ? "--nextclade nextclade.json" : ""
     def pangolin = params.report_lineage as Boolean ? "--pangolin pangolin.csv" : ""
@@ -211,11 +211,11 @@ process report_no_data {
         val error
         path "params.json"
     output:
-        path "wf-artic-*.html"
+        path "wf-ion-covid-*.html"
         path "*.json", optional: true
     script:
     // when genotype_variants is false the channel contains a mock file
-    def report_name = "wf-artic-report.html"
+    def report_name = "wf-ion-covid-report.html"
     def error_message = error
     """
     workflow-glue report_error \

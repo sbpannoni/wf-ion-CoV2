@@ -228,10 +228,10 @@ def argparser():
         help="Override the default sample name")
     parser.add_argument(
         "--lab_id", required=False, type=str,
-        help="Override the default lab_id (ONT)", default="ONT")
+        help="Override the default lab_id", default="")
     parser.add_argument(
         "--testkit", required=False, type=str,
-        help="Override default testKit (ONT_spikeseq)",
-        default="ONT_spikeseq")
+        help="Override default testKit (IonTorrent_ampliseq)",
+        default="IonTorrent_ampliseq")
 
     return parser
